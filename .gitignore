@@ -50,6 +50,6 @@ package.nls.*.json
 l10n/
 
 
-sound/
+sound/*
 .vscode/
 .history/
