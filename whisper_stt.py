@@ -1,16 +1,11 @@
-import argparse
 import tkinter as tk
 import sounddevice as sd
 import wavio
+import threading
+import torch
 import numpy as np
-import argparse
-import torch
+import time
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-from datasets import load_dataset
-import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-from datasets import load_dataset
-
 
 
 def create_pipe():
@@ -57,36 +52,64 @@ def create_pipe():
 
 
 
-def record_audio(filename='recording.wav', duration=5):
+def record_audio(filename='recording.wav', stop_event=None, on_complete=None):
     # 錄製音頻
     fs = 44100  # 採樣率
-    myrecording = sd.rec(int(duration * fs), samplerate=fs, channels=2)
-    sd.wait()  # 等待錄音完成
-    wavio.write(filename, myrecording, fs, sampwidth=2)
+    myrecording = []
+    
+    def callback(indata, frames, time, status):
+        if status:
+            print(status, flush=True)
+        if stop_event.is_set():
+            return sd.CallbackAbort  # 當 stop_event 被設置時，提前終止錄音
+        myrecording.append(indata.copy())
+
+    try:
+        with sd.InputStream(samplerate=fs, channels=2, callback=callback):
+            while not stop_event.is_set():
+                sd.sleep(100)
+    except sd.CallbackAbort:
+        pass
+
+    wav_data = np.concatenate(myrecording, axis=0)
+    wavio.write(filename, wav_data, fs, sampwidth=2)
+    if on_complete:
+        on_complete()
+
 
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title("語音轉文字")
-        tk.Button(self.root, text="開始錄音", command=self.start_recording).pack()
+        tk.Button(self.root, text="開始錄音", command=self.start_recording_thread).pack()
         tk.Button(self.root, text="停止錄音並轉寫", command=self.stop_and_transcribe).pack()
         self.show_timestamps_btn = tk.Button(self.root, text="顯示時間戳", command=self.toggle_show_timestamps)
         self.show_timestamps_btn.pack()
         self.show_timestamps = False
         self.text = tk.Text(self.root)
         self.text.pack()
-    
-    def start_recording(self):
-        self.filename = 'sound/recording.wav'
-        # 開始錄音（這裡可以設置錄音時長或以其他方式控制）
-        record_audio(self.filename, duration=10)  # 例如錄製10秒
-    
+        self.recording_thread = None
+        self.filename = "sound/recording.wav"
+
+    def start_recording_thread(self):
+        self.stop_event = threading.Event()
+        self.recording_thread = threading.Thread(target=record_audio,
+                args=(self.filename, self.stop_event, self.on_recording_complete))
+        self.recording_thread.start()
+
+    def on_recording_complete(self):
+        # 在錄音完成後更新 GUI，需要在主線程中執行
+        self.root.after(0, self.stop_and_transcribe)
+
     def stop_and_transcribe(self):
+        print("in stop_and_transcribe")
+        if self.recording_thread and self.recording_thread.is_alive():
+            self.stop_event.set()
+            self.recording_thread.join()
         # 使用 WhisperLargeV3 模型進行轉寫
         pipe = create_pipe()
         result = pipe(self.filename, return_timestamps=True)
         result_chunks = result["chunks"]
-
 
         for chunk in result_chunks:
             if self.show_timestamps:
